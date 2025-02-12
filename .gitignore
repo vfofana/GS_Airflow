@@ -1,0 +1,7 @@
+*.log
+.idea/
+logs/
+veng/
+videos/
+__pycache__
+bdd_airflow
