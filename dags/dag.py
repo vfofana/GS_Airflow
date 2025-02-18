@@ -2,7 +2,7 @@ from airflow.decorators import task
 from airflow.models.dag import dag
 from airflow.operators.empty import EmptyOperator
 import requests
-from marshmallow.utils import timestamp
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from requests.auth import HTTPBasicAuth
 import duckdb
 import json
@@ -61,54 +61,35 @@ def get_flight_data(column, url, creds):
         'rows' : len(states_json)
     }
 
-@task
-def load_from_file(ti=None):
-    conn = None
-    data_file_name = ti.xcom_pull(task_ids="get_flight_data", key="filename")
-    try:
-        conn = duckdb.connect('dags/data/bdd_airflow')
-        conn.sql(f"INSERT INTO bdd_airflow.main.openskynetwork_brute (SELECT * FROM'{data_file_name}')")
 
-    finally:
-        if conn:
-            conn.close()
+def load_from_file():
+    return SQLExecuteQueryOperator(
+        task_id="load_from_file",
+        conn_id="DUCK_DB",
+        sql="INSERT INTO bdd_airflow.main.openskynetwork_brute (SELECT * FROM'{{ti.xcom_pull(task_ids='get_flight_data', key='filename')}}')",
+        return_last=True,
+        show_return_value_in_logs=True
+    )
 
 
 @task
 def check_row_number(ti=None):
-    conn = None
-    nbre_lignes_attendues = 0
-    print(f"timestamp = {ti.xcom_pull(task_ids='get_flight_data', key='timestamp')}")
-    contenu_xcom =  ti.xcom_pull(task_ids="get_flight_data", key="return_value")
-    timestamp = contenu_xcom["timestamp"]
-    nbre_lignes_prevues = contenu_xcom["rows"]
-    try:
-        conn = duckdb.connect("dags/data/bdd_airflow", read_only=True)
-        nbre_lignes_attendues = conn.sql(f"SELECT COUNT(*) FROM bdd_airflow.main.openskynetwork_brute WHERE timestamp = {timestamp}").fetchone()[0]
-    finally:
-        if conn:
-            conn.close()
+
+    nbre_lignes_prevues =  ti.xcom_pull(task_ids="get_flight_data", key="rows")
+    nbre_lignes_attendues = ti.xcom_pull(task_ids="load_from_file", key="return_value")[0][0]
     if nbre_lignes_attendues != nbre_lignes_prevues:
         raise Exception(f"Nombre de lignes dans la base ({nbre_lignes_attendues}) != nombre de lignes prevues de l'API ({nbre_lignes_prevues})")
     print(f"Le nombre de lignes: {nbre_lignes_attendues}")
 
-@task
-def check_duplicates():
-    conn = None
-    nbre_duplicates = 0
-    try:
-        conn = duckdb.connect("dags/data/bdd_airflow", read_only=True)
-        nbre_duplicates = conn.sql("""
-        SELECT callsign, time_position, last_contact, count(*) as cnt
-        FROM bdd_airflow.main.openskynetwork_brute
-        GROUP BY 1,2,3
-        HAVING cnt > 1
-        """).count(column='cnt').fetchone()[0]
-    finally:
-        if conn:
-            conn.close()
 
-    print(f"Le nombre de lignes dupliquées: {nbre_duplicates}")
+def check_duplicates():
+    return SQLExecuteQueryOperator(
+        task_id="check_duplicates",
+        conn_id="DUCK_DB",
+        sql="check_duplicates.sql",
+        return_last=True,
+        show_return_value_in_logs=True
+    )
 
 @dag()
 def flights_pipeline():
