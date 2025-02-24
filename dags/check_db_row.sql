@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM {target_table} WHERE timestamp = {timestamp}

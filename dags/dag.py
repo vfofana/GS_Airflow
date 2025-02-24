@@ -1,13 +1,15 @@
 import time
 from datetime import datetime
 
-from airflow.decorators import task
+import duckdb
+from airflow.decorators import task, task_group
 from airflow.models import Param
 from airflow.models.dag import dag
 from airflow.operators.empty import EmptyOperator
 import requests
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.sensors.filesystem import FileSensor
+from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
 
@@ -37,10 +39,12 @@ URL_ALL_STATES = "https://opensky-network.org/api/states/all?extended=true"
 CREDENTIALS = {"username": 'FOFANA',
                "password": "Juni0r2104."}
 
-endpoint_to_params = {
-    "states":{
-        "url":"https://opensky-network.org/api/states/all?extended=true",
-        "colonnes" : ["icao24","callsign",
+liste_des_apis = [
+    {
+    "schedule":"30 9 * * *",
+    "nom":"states",
+    "url":"https://opensky-network.org/api/states/all?extended=true",
+    "colonnes" : ["icao24","callsign",
                       "origin_country","time_position",
                       "last_contact","longitude",
                       "latitude","baro_altitude",
@@ -50,12 +54,14 @@ endpoint_to_params = {
                       "squawk","spi",
                       "position_source","category"
                       ],
-        "target_table":"bdd_airflow.main.openskynetwork_brute",
-        "timestamp_required" : False
-            },
-    "flights":{
-        "url":"https://opensky-network.org/api/flights/all?begin={begin}&end={end}",
-        "colonnes" : [
+    "target_table":"bdd_airflow.main.openskynetwork_brute",
+    "timestamp_required" : False
+    },
+    {
+    "schedule":"30 13 * * *",
+    "nom":"flights",
+    "url":"https://opensky-network.org/api/flights/all?begin={begin}&end={end}",
+    "colonnes" : [
             "icao24","firstSeen",
             "estDepartureAirport","lastSeen",
             "estArrivalAirport","callsign",
@@ -64,29 +70,39 @@ endpoint_to_params = {
             "departureAirportCandidatesCount","arrivalAirportCandidatesCount",
             "timestamp"
         ],
-        "target_table":"bdd_airflow.main.flights_brute",
-        "timestamp_required" : True
+    "target_table":"bdd_airflow.main.flights_brute",
+    "timestamp_required" : True
     }
 
-}
+]
+
+
 
 def format_datetime(input_datetime):
     return input_datetime.strftime("%Y%m%d")
 
 @task(multiple_outputs=True)
-def run_parameters(params=None, dag_run=None):
+def run_parameters(api, dag_run=None):
+
+    out = api
 
     date_interval_start = format_datetime(dag_run.data_interval_start)
     date_interval_end = format_datetime(dag_run.data_interval_end)
 
-    out = endpoint_to_params[params["endpoint"]]
-    out ["data_file_name"] = f"dags/data/data_{date_interval_start}_{date_interval_end}.json"
+    data_file_name = f"dags/data/data_{out['nom']}_{date_interval_start}_{date_interval_end}.json"
+    out["data_file_name"] = data_file_name
+
+    #SQL pour charger les données dans le DWH
+    with open("dags/load_from_file.sql","r") as f:
+        load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
+    out["load_from_file_sql"] = load_from_file_sql
 
     if out["timestamp_required"]:
         end = int(time.time())
         begin = end-3600
         out["url"] = out["url"].format(begin=begin,end=end)
-    return out
+
+    return {"run_params":out}
 
 def flights_to_dict(flights,timestamp):
     out = []
@@ -105,11 +121,19 @@ def states_to_dict(states_list, colonnes, timestamp):
         out.append(states_dict)
     return out
 
+@task_group
+def ingestion_data_tg(creds, run_params):
+    get_flight_data(creds=creds, run_params=run_params) >> load_from_file(run_params)
+
+@task_group
+def data_quality_tg(run_params):
+    check_row_number(run_params)
+    check_duplicates(run_params)
+
 @task(multiple_outputs=True)
-def get_flight_data(creds,ti=None):
+def get_flight_data(creds,run_params):
 
     # Retrouve les paramètres de XCOM
-    run_params = ti.xcom_pull(task_ids="run_parameters", key="return_value")
     data_file_name = run_params["data_file_name"]
     url = run_params["url"]
     column = run_params["colonnes"]
@@ -136,63 +160,78 @@ def get_flight_data(creds,ti=None):
         'rows' : len(response_json)
     }
 
-
-def load_from_file():
-    return SQLExecuteQueryOperator(
-        task_id="load_from_file",
-        conn_id="DUCK_DB",
-        sql="load_from_file.sql",
-        return_last=True,
-        show_return_value_in_logs=True
-    )
+@task
+def load_from_file(run_params):
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        conn.sql(run_params['load_from_file_sql'])
 
 
 @task
-def check_row_number(ti=None):
+def check_row_number(run_params, ti=None):
+    # Récupérer les résultats de la tâche get_flight_data
+    rows = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="rows")
+    timestamp = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="timestamp")
+    rows_states = rows[0]
+    rows_flight = rows[1]
+    timestamp_states = timestamp[0]
+    timestamp_flight = timestamp[1]
 
-    nbre_lignes_prevues =  ti.xcom_pull(task_ids="get_flight_data", key="rows")
-    nbre_lignes_attendues = ti.xcom_pull(task_ids="load_from_file", key="return_value")[0][0]
-    if nbre_lignes_attendues != nbre_lignes_prevues:
-        raise Exception(f"Nombre de lignes dans la base ({nbre_lignes_attendues}) != nombre de lignes prevues de l'API ({nbre_lignes_prevues})")
-    print(f"Le nombre de lignes: {nbre_lignes_attendues}")
+    # Charger et formater la requête SQL en utilisant le timestamp récupéré
+    with open("dags/check_db_row.sql", "r") as f:
+        sql_template = f.read()
 
+    if run_params["timestamp_required"]:
+        sql_query = sql_template.format(target_table=run_params["target_table"],timestamp=timestamp_flight)
+    else:
+        sql_query = sql_template.format(target_table=run_params["target_table"], timestamp=timestamp_states)
 
-def check_duplicates():
-    return SQLExecuteQueryOperator(
-        task_id="check_duplicates",
-        conn_id="DUCK_DB",
-        sql="check_duplicates.sql",
-        return_last=True,
-        show_return_value_in_logs=True
-    )
+    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
+        nb_lignes_trouvees = conn.sql(sql_query).fetchone()[0]
+
+    if run_params["timestamp_required"]:
+
+        print(f"Nombre de lignes prévues: {rows_flight} contre nombre de lignes trouvées: {nb_lignes_trouvees}")
+        if nb_lignes_trouvees != rows_flight:
+            raise Exception(
+                f"Nombre de lignes dans la base ({nb_lignes_trouvees}) != nombre de lignes prévues de l'API ({rows_flight})"
+            )
+    else:
+        print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {nb_lignes_trouvees}")
+        if nb_lignes_trouvees != rows_states:
+            raise Exception(
+                f"Nombre de lignes dans la base ({nb_lignes_trouvees}) != nombre de lignes prévues de l'API ({rows_states})"
+            )
+@task
+def check_duplicates(run_params):
+    nb_lignes_duplicates = 0
+    with open("dags/check_duplicates.sql", "r") as f:
+        sql_template = f.read()
+
+    if run_params["timestamp_required"]:
+        sql_query = sql_template.format(target_table=run_params["target_table"])
+    else:
+        sql_query = sql_template.format(target_table=run_params["target_table"])
+
+    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
+        nb_lignes_duplicates = conn.sql(sql_query).fetchone()[0]
+
+    print(f"Lignes dupliquées={nb_lignes_duplicates}")
 
 @dag(
-    params={"endpoint":Param(
-        default="states",
-        enum = list(endpoint_to_params.keys())
-    )},
-    start_date = datetime(2025,2,22),
-    schedule="0 0 * * *",
-    catchup=True,
-    concurrency=1,
+        start_date=datetime(2025, 2, 1),
+        schedule=None,
+        catchup=False,
+        concurrency=1,
 )
 def flights_pipeline():
+    run_parameters_task = run_parameters.expand(api=liste_des_apis)
     (
-        EmptyOperator(task_id="start")
-        >>FileSensor(
-        task_id="attendre_les_données",
-        fs_conn_id="connection_fichier",
-        filepath="dags/new_data/{{params.endpoint}}",
-        poke_interval=120,
-        mode="reschedule",
-        timeout=600
-        )
-        >>run_parameters()
-        >> get_flight_data(CREDENTIALS)
-        >> load_from_file()
-        >> [check_row_number(),check_duplicates()]
-        >>EmptyOperator(task_id="end")
+            EmptyOperator(task_id="start")
+            >> run_parameters_task
+            >> ingestion_data_tg.partial(creds=CREDENTIALS).expand_kwargs(run_parameters_task)
+            >> data_quality_tg.expand_kwargs(run_parameters_task)
+            >> EmptyOperator(task_id="end")
     )
 
 
-flights_pipeline_dag = flights_pipeline()
+flights_pipeline()
