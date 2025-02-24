@@ -13,28 +13,6 @@ from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
 
-COLONNES_OPEN_SKY = [
-    "icao24",
-    "callsign",
-    "origin_country",
-    "time_position",
-    "last_contact",
-    "longitude",
-    "latitude",
-    "baro_altitude",
-    "on_ground",
-    "velocity",
-    "true_track",
-    "vertical_rate",
-    "sensors",
-    "geo_altitude",
-    "squawk",
-    "spi",
-    "position_source",
-    "category"
-]
-
-URL_ALL_STATES = "https://opensky-network.org/api/states/all?extended=true"
 
 CREDENTIALS = {"username": 'FOFANA',
                "password": "Juni0r2104."}
@@ -203,7 +181,6 @@ def check_row_number(run_params, ti=None):
             )
 @task
 def check_duplicates(run_params):
-    nb_lignes_duplicates = 0
     with open("dags/check_duplicates.sql", "r") as f:
         sql_template = f.read()
 
