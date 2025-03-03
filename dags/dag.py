@@ -61,9 +61,11 @@ def format_datetime(input_datetime):
     return input_datetime.strftime("%Y%m%d")
 
 @task(multiple_outputs=True)
-def run_parameters(api, dag_run=None):
+def run_parameters(api, dag_run=None, ti=None):
 
     out = api
+
+    timestamp = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="timestamp")
 
     date_interval_start = format_datetime(dag_run.data_interval_start)
     date_interval_end = format_datetime(dag_run.data_interval_end)
@@ -76,10 +78,15 @@ def run_parameters(api, dag_run=None):
         load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
     out["load_from_file_sql"] = load_from_file_sql
 
-    #SQL pour compter les lignes recues
+    #SQL pour compter les lignes dans le DWH
     with open("dags/check_db_row.sql", "r") as f:
-        check_db_row_sql = f.read()
+        check_db_row_sql = f.read().format(target_table=out["target_table"],timestamp=timestamp)
     out["check_db_row_sql"] = check_db_row_sql
+
+    #SQL pour verifier le nombre de lignes dupliquées dans le DWH
+    with open("dags/check_duplicates.sql", "r") as f:
+        check_duplicates_sql = f.read().format(target_table=out["target_table"])
+    out["check_duplicates_sql"] = check_duplicates_sql
 
     if out["timestamp_required"]:
         end = int(time.time())
@@ -171,37 +178,28 @@ def count_row(run_params,ti=None):
 def check_row_number(run_params, ti=None):
     # Récupérer les résultats de la tâche get_flight_data
     rows = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="rows")
-    lignes_trouvees = ti.xcom_pull(task_ids="count_row", key="rows")
-    nb_lignes_trouvees_states = lignes_trouvees[0]
-    nb_lignes_trouvees_flights = lignes_trouvees[1]
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        nb_row_except = conn.sql(run_params['check_db_row_sql'])
     rows_states = rows[0]
     rows_flight = rows[1]
 
     if run_params["timestamp_required"]:
-
-        print(f"Nombre de lignes prévues: {rows_flight} contre nombre de lignes trouvées: {nb_lignes_trouvees_flights}")
-        if nb_lignes_trouvees_flights != rows_flight:
+        print(f"Nombre de lignes prévues: {rows_flight} contre nombre de lignes trouvées: {nb_row_except}")
+        if nb_row_except != rows_flight:
             raise Exception(
-                f"Nombre de lignes dans la base ({nb_lignes_trouvees_flights}) != nombre de lignes prévues de l'API ({rows_flight})"
+                f"Nombre de lignes dans la base ({nb_row_except}) != nombre de lignes prévues de l'API ({rows_flight})"
             )
     else:
-        print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {nb_lignes_trouvees_states}")
-        if nb_lignes_trouvees_states != rows_states:
+        print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {nb_row_except}")
+        if nb_row_except != rows_states:
             raise Exception(
-                f"Nombre de lignes dans la base ({nb_lignes_trouvees_states}) != nombre de lignes prévues de l'API ({rows_states})"
+                f"Nombre de lignes dans la base ({nb_row_except}) != nombre de lignes prévues de l'API ({rows_states})"
             )
+
 @task
 def check_duplicates(run_params):
-    with open("dags/check_duplicates.sql", "r") as f:
-        sql_template = f.read()
-
-    if run_params["timestamp_required"]:
-        sql_query = sql_template.format(target_table=run_params["target_table"])
-    else:
-        sql_query = sql_template.format(target_table=run_params["target_table"])
-
-    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
-        nb_lignes_duplicates = conn.sql(sql_query).fetchone()[0]
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql'])
 
     print(f"Lignes dupliquées={nb_lignes_duplicates}")
 
@@ -217,7 +215,6 @@ def flights_pipeline():
             EmptyOperator(task_id="start")
             >> run_parameters_task
             >> ingestion_data_tg.partial(creds=CREDENTIALS).expand_kwargs(run_parameters_task)
-            >> count_row.expand_kwargs(run_parameters_task)
             >> data_quality_tg.expand_kwargs(run_parameters_task)
             >> EmptyOperator(task_id="end")
     )
