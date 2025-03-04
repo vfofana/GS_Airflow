@@ -65,8 +65,6 @@ def run_parameters(api, dag_run=None, ti=None):
 
     out = api
 
-    timestamp = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="timestamp")
-
     date_interval_start = format_datetime(dag_run.data_interval_start)
     date_interval_end = format_datetime(dag_run.data_interval_end)
 
@@ -80,7 +78,7 @@ def run_parameters(api, dag_run=None, ti=None):
 
     #SQL pour compter les lignes dans le DWH
     with open("dags/check_db_row.sql", "r") as f:
-        check_db_row_sql = f.read().format(target_table=out["target_table"],timestamp=timestamp)
+        check_db_row_sql = f.read()
     out["check_db_row_sql"] = check_db_row_sql
 
     #SQL pour verifier le nombre de lignes dupliquées dans le DWH
@@ -156,50 +154,40 @@ def load_from_file(run_params):
     with duckdb.connect("dags/data/bdd_airflow") as conn:
         conn.sql(run_params['load_from_file_sql'])
 
-@task(multiple_outputs=True)
-def count_row(run_params,ti=None):
-    timestamp = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="timestamp")
-    timestamp_states = timestamp[0]
-    timestamp_flight = timestamp[1]
-
-    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
-        if run_params["timestamp_required"]:
-            sql_query = run_params["check_db_row_sql"].format(target_table=run_params["target_table"],timestamp=timestamp_flight)
-            nb_lignes_trouvees = conn.sql(sql_query).fetchone()[0]
-            print(f"nombre de lignes flights: {nb_lignes_trouvees}")
-        else:
-            sql_query = run_params["check_db_row_sql"].format(target_table=run_params["target_table"],timestamp=timestamp_states)
-            nb_lignes_trouvees = conn.sql(sql_query).fetchone()[0]
-            print(f"nombre de lignes flights: {nb_lignes_trouvees}")
-
-    return {"rows":nb_lignes_trouvees}
 
 @task
 def check_row_number(run_params, ti=None):
-    # Récupérer les résultats de la tâche get_flight_data
-    rows = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="rows")
-    with duckdb.connect("dags/data/bdd_airflow") as conn:
-        nb_row_except = conn.sql(run_params['check_db_row_sql'])
-    rows_states = rows[0]
-    rows_flight = rows[1]
+    # Récupérer les résultats de la tâche get_flight_data et eviter plusieurs appels.
+    get_flight_data = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="return_value")
 
-    if run_params["timestamp_required"]:
-        print(f"Nombre de lignes prévues: {rows_flight} contre nombre de lignes trouvées: {nb_row_except}")
-        if nb_row_except != rows_flight:
-            raise Exception(
-                f"Nombre de lignes dans la base ({nb_row_except}) != nombre de lignes prévues de l'API ({rows_flight})"
-            )
-    else:
-        print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {nb_row_except}")
-        if nb_row_except != rows_states:
-            raise Exception(
-                f"Nombre de lignes dans la base ({nb_row_except}) != nombre de lignes prévues de l'API ({rows_states})"
-            )
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        if not run_params["timestamp_required"]:
+            timestamp = get_flight_data[0]['timestamp']
+            rows_states = get_flight_data[0]['rows']
+            rows_states_except = conn.sql(run_params['check_db_row_sql'].format(target_table=run_params["target_table"],timestamp=timestamp)).fetchone()[0]
+            print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {rows_states_except}")
+            if rows_states != rows_states_except:
+                raise Exception(
+                    f"Nombre de lignes dans le DWH ({rows_states_except}) != nombre de lignes prévues de l'API ({rows_states})"
+                )
+            else:
+                print("States data OK")
+        else:
+            timestamp = get_flight_data[1]['timestamp']
+            rows_flights = get_flight_data[1]['rows']
+            rows_flight_except = conn.sql(run_params['check_db_row_sql'].format(target_table=run_params["target_table"], timestamp=timestamp)).fetchone()[0]
+            print(f"Nombre de lignes prévues: {rows_flights} contre nombre de lignes trouvées: {rows_flight_except}")
+            if rows_flights != rows_flight_except:
+                raise Exception(
+                    f"Nombre de lignes dans le DWH ({rows_flight_except}) != nombre de lignes prévues de l'API ({rows_flights})"
+                )
+            else:
+                print("Flights data OK")
 
 @task
 def check_duplicates(run_params):
     with duckdb.connect("dags/data/bdd_airflow") as conn:
-        nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql'])
+        nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql']).fetchone()[0]
 
     print(f"Lignes dupliquées={nb_lignes_duplicates}")
 
