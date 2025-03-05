@@ -13,28 +13,7 @@ from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
 
-COLONNES_OPEN_SKY = [
-    "icao24",
-    "callsign",
-    "origin_country",
-    "time_position",
-    "last_contact",
-    "longitude",
-    "latitude",
-    "baro_altitude",
-    "on_ground",
-    "velocity",
-    "true_track",
-    "vertical_rate",
-    "sensors",
-    "geo_altitude",
-    "squawk",
-    "spi",
-    "position_source",
-    "category"
-]
-
-URL_ALL_STATES = "https://opensky-network.org/api/states/all?extended=true"
+from sqlalchemy.sql import True_
 
 CREDENTIALS = {"username": 'FOFANA',
                "password": "Juni0r2104."}
@@ -82,7 +61,7 @@ def format_datetime(input_datetime):
     return input_datetime.strftime("%Y%m%d")
 
 @task(multiple_outputs=True)
-def run_parameters(api, dag_run=None):
+def run_parameters(api, dag_run=None, ti=None):
 
     out = api
 
@@ -96,6 +75,16 @@ def run_parameters(api, dag_run=None):
     with open("dags/load_from_file.sql","r") as f:
         load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
     out["load_from_file_sql"] = load_from_file_sql
+
+    #SQL pour compter les lignes dans le DWH
+    with open("dags/check_db_row.sql", "r") as f:
+        check_db_row_sql = f.read()
+    out["check_db_row_sql"] = check_db_row_sql
+
+    #SQL pour verifier le nombre de lignes dupliquées dans le DWH
+    with open("dags/check_duplicates.sql", "r") as f:
+        check_duplicates_sql = f.read().format(target_table=out["target_table"])
+    out["check_duplicates_sql"] = check_duplicates_sql
 
     if out["timestamp_required"]:
         end = int(time.time())
@@ -168,52 +157,37 @@ def load_from_file(run_params):
 
 @task
 def check_row_number(run_params, ti=None):
-    # Récupérer les résultats de la tâche get_flight_data
-    rows = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="rows")
-    timestamp = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="timestamp")
-    rows_states = rows[0]
-    rows_flight = rows[1]
-    timestamp_states = timestamp[0]
-    timestamp_flight = timestamp[1]
+    # Récupérer les résultats de la tâche get_flight_data et eviter plusieurs appels.
+    get_flight_data = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="return_value")
 
-    # Charger et formater la requête SQL en utilisant le timestamp récupéré
-    with open("dags/check_db_row.sql", "r") as f:
-        sql_template = f.read()
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        if not run_params["timestamp_required"]:
+            timestamp = get_flight_data[0]['timestamp']
+            rows_states = get_flight_data[0]['rows']
+            rows_states_except = conn.sql(run_params['check_db_row_sql'].format(target_table=run_params["target_table"],timestamp=timestamp)).fetchone()[0]
+            print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {rows_states_except}")
+            if rows_states != rows_states_except:
+                raise Exception(
+                    f"Nombre de lignes dans le DWH ({rows_states_except}) != nombre de lignes prévues de l'API ({rows_states})"
+                )
+            else:
+                print("States data OK")
+        else:
+            timestamp = get_flight_data[1]['timestamp']
+            rows_flights = get_flight_data[1]['rows']
+            rows_flight_except = conn.sql(run_params['check_db_row_sql'].format(target_table=run_params["target_table"], timestamp=timestamp)).fetchone()[0]
+            print(f"Nombre de lignes prévues: {rows_flights} contre nombre de lignes trouvées: {rows_flight_except}")
+            if rows_flights != rows_flight_except:
+                raise Exception(
+                    f"Nombre de lignes dans le DWH ({rows_flight_except}) != nombre de lignes prévues de l'API ({rows_flights})"
+                )
+            else:
+                print("Flights data OK")
 
-    if run_params["timestamp_required"]:
-        sql_query = sql_template.format(target_table=run_params["target_table"],timestamp=timestamp_flight)
-    else:
-        sql_query = sql_template.format(target_table=run_params["target_table"], timestamp=timestamp_states)
-
-    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
-        nb_lignes_trouvees = conn.sql(sql_query).fetchone()[0]
-
-    if run_params["timestamp_required"]:
-
-        print(f"Nombre de lignes prévues: {rows_flight} contre nombre de lignes trouvées: {nb_lignes_trouvees}")
-        if nb_lignes_trouvees != rows_flight:
-            raise Exception(
-                f"Nombre de lignes dans la base ({nb_lignes_trouvees}) != nombre de lignes prévues de l'API ({rows_flight})"
-            )
-    else:
-        print(f"Nombre de lignes prévues: {rows_states} contre nombre de lignes trouvées: {nb_lignes_trouvees}")
-        if nb_lignes_trouvees != rows_states:
-            raise Exception(
-                f"Nombre de lignes dans la base ({nb_lignes_trouvees}) != nombre de lignes prévues de l'API ({rows_states})"
-            )
 @task
 def check_duplicates(run_params):
-    nb_lignes_duplicates = 0
-    with open("dags/check_duplicates.sql", "r") as f:
-        sql_template = f.read()
-
-    if run_params["timestamp_required"]:
-        sql_query = sql_template.format(target_table=run_params["target_table"])
-    else:
-        sql_query = sql_template.format(target_table=run_params["target_table"])
-
-    with duckdb.connect("dags/data/bdd_airflow", read_only=True) as conn:
-        nb_lignes_duplicates = conn.sql(sql_query).fetchone()[0]
+    with duckdb.connect("dags/data/bdd_airflow") as conn:
+        nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql']).fetchone()[0]
 
     print(f"Lignes dupliquées={nb_lignes_duplicates}")
 
