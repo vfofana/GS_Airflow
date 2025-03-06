@@ -72,17 +72,17 @@ def run_parameters(api, dag_run=None, ti=None):
     out["data_file_name"] = data_file_name
 
     #SQL pour charger les données dans le DWH
-    with open("dags/load_from_file.sql","r") as f:
+    with open("dags/sql/load_from_file.sql","r") as f:
         load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
     out["load_from_file_sql"] = load_from_file_sql
 
     #SQL pour compter les lignes dans le DWH
-    with open("dags/check_db_row.sql", "r") as f:
+    with open("dags/sql/check_db_row.sql", "r") as f:
         check_db_row_sql = f.read()
     out["check_db_row_sql"] = check_db_row_sql
 
     #SQL pour verifier le nombre de lignes dupliquées dans le DWH
-    with open("dags/check_duplicates.sql", "r") as f:
+    with open("dags/sql/check_duplicates.sql", "r") as f:
         check_duplicates_sql = f.read().format(target_table=out["target_table"])
     out["check_duplicates_sql"] = check_duplicates_sql
 
@@ -153,7 +153,6 @@ def get_flight_data(creds,run_params):
 def load_from_file(run_params):
     with duckdb.connect("dags/data/bdd_airflow") as conn:
         conn.sql(run_params['load_from_file_sql'])
-
 
 @task
 def check_row_number(run_params, ti=None):
