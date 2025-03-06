@@ -12,11 +12,18 @@ from airflow.sensors.filesystem import FileSensor
 from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
-
+from dotenv import dotenv_values, load_dotenv
+import os
 from sqlalchemy.sql import True_
 
-CREDENTIALS = {"username": 'FOFANA',
-               "password": "Juni0r2104."}
+
+load_dotenv()
+
+CREDENTIALS = {
+    "username": os.getenv('IDOPENSKY'),
+    "password": os.getenv('MOTDEPASSE')
+}
+
 
 liste_des_apis = [
     {
