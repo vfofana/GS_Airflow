@@ -67,38 +67,59 @@ liste_des_apis = [
 def format_datetime(input_datetime):
     return input_datetime.strftime("%Y%m%d")
 
-@task(multiple_outputs=True)
-def run_parameters(api, dag_run=None, ti=None):
-
-    out = api
+@task
+def generer_data_file_name(api, dag_run=None):
 
     date_interval_start = format_datetime(dag_run.data_interval_start)
     date_interval_end = format_datetime(dag_run.data_interval_end)
 
-    data_file_name = f"dags/data/data_{out['nom']}_{date_interval_start}_{date_interval_end}.json"
-    out["data_file_name"] = data_file_name
+    data_file_name = f"dags/data/data_{api['nom']}_{date_interval_start}_{date_interval_end}.json"
+    api["data_file_name"] = data_file_name
 
-    #SQL pour charger les données dans le DWH
-    with open("dags/sql/load_from_file.sql","r") as f:
-        load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
-    out["load_from_file_sql"] = load_from_file_sql
+    return {'api_a':api}
 
-    #SQL pour compter les lignes dans le DWH
+@task
+def execute_sql_queries(api_a):
+    # SQL pour charger les données dans le DWH
+    with open("dags/sql/load_from_file.sql", "r") as f:
+        load_from_file_sql = f.read().format(target_table=api_a["target_table"], data_file_name=api_a["data_file_name"])
+    api_a["load_from_file_sql"] = load_from_file_sql
+
+    # SQL pour compter les lignes dans le DWH
     with open("dags/sql/check_db_row.sql", "r") as f:
         check_db_row_sql = f.read()
-    out["check_db_row_sql"] = check_db_row_sql
+    api_a["check_db_row_sql"] = check_db_row_sql
 
-    #SQL pour verifier le nombre de lignes dupliquées dans le DWH
+    # SQL pour verifier le nombre de lignes dupliquées dans le DWH
     with open("dags/sql/check_duplicates.sql", "r") as f:
-        check_duplicates_sql = f.read().format(target_table=out["target_table"])
-    out["check_duplicates_sql"] = check_duplicates_sql
+        check_duplicates_sql = f.read().format(target_table=api_a["target_table"])
+    api_a["check_duplicates_sql"] = check_duplicates_sql
 
-    if out["timestamp_required"]:
+    return {'api_b': api_a}
+
+@task(multiple_outputs=True)
+def update_url(api_b , ti=None):
+    if api_b["timestamp_required"]:
         end = int(time.time())
         begin = end-3600
-        out["url"] = out["url"].format(begin=begin,end=end)
+        api_b["url"] = api_b["url"].format(begin=begin,end=end)
 
-    return {"run_params":out}
+    return {"run_params":api_b}
+
+
+from airflow.decorators import task_group
+
+
+@task_group
+def prepare_data_tg(liste_des_apis):
+    data_file_name_task = generer_data_file_name.expand(api=liste_des_apis)
+    execute_sql_queries_task = execute_sql_queries.expand_kwargs(data_file_name_task)
+    update_url_task = update_url.expand_kwargs(execute_sql_queries_task)
+
+    data_file_name_task >> execute_sql_queries_task >> update_url_task
+
+    return update_url_task
+
 
 def flights_to_dict(flights,timestamp):
     out = []
@@ -197,19 +218,20 @@ def check_duplicates(run_params):
 
     print(f"Lignes dupliquées={nb_lignes_duplicates}")
 
+
 @dag(
-        start_date=datetime(2025, 2, 1),
-        schedule=None,
-        catchup=False,
-        concurrency=1,
+    start_date=datetime(2025, 2, 1),
+    schedule=None,
+    catchup=False,
+    concurrency=1,
 )
 def flights_pipeline():
-    run_parameters_task = run_parameters.expand(api=liste_des_apis)
+    run_parameters_taskgroup = prepare_data_tg(liste_des_apis)
     (
             EmptyOperator(task_id="start")
-            >> run_parameters_task
-            >> ingestion_data_tg.partial(creds=CREDENTIALS).expand_kwargs(run_parameters_task)
-            >> data_quality_tg.expand_kwargs(run_parameters_task)
+            >> run_parameters_taskgroup
+            >> ingestion_data_tg.partial(creds=CREDENTIALS).expand_kwargs(run_parameters_taskgroup)
+            >> data_quality_tg.expand_kwargs(run_parameters_taskgroup)
             >> EmptyOperator(task_id="end")
     )
 
