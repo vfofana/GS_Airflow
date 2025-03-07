@@ -122,14 +122,9 @@ def prepare_data_tg(liste_des_apis):
     return update_url_task
 
 
-def flights_to_dict(flights,timestamp):
-    out = []
+def flights_to_dict(flights, timestamp):
+    return [dict(flight, timestamp=timestamp) for flight in flights]
 
-    for flight in flights:
-        flight["timestamp"] = timestamp
-        out.append(flight)
-
-    return out
 
 def states_to_dict(states_list, colonnes, timestamp):
     out = []
