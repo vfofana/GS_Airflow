@@ -1,6 +1,5 @@
 import time
 from datetime import datetime
-
 import duckdb
 from airflow.decorators import task, task_group
 from airflow.models import Param
@@ -12,13 +11,17 @@ from airflow.sensors.filesystem import FileSensor
 from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
-
+from dotenv import load_dotenv
+import os
 from sqlalchemy.sql import True_
 
-sql_path = "dags/sql/"
 
-CREDENTIALS = {"username": 'FOFANA',
-               "password": "Juni0r2104."}
+load_dotenv()
+
+CREDENTIALS = {"username":os.getenv('IDOPENSKY'),
+               "password":os.getenv('MOTDEPASSE')}
+
+sql_path = "dags/sql/"
 
 liste_des_apis = [
     {
