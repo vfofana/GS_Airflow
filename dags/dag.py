@@ -55,7 +55,7 @@ liste_des_apis = [
 
 ]
 
-
+DB_PATH = "dags/data/bdd_airflow"
 
 def format_datetime(input_datetime):
     return input_datetime.strftime("%Y%m%d")
@@ -151,7 +151,7 @@ def get_flight_data(creds,run_params):
 
 @task
 def load_from_file(run_params):
-    with duckdb.connect("dags/data/bdd_airflow") as conn:
+    with duckdb.connect(DB_PATH) as conn:
         conn.sql(run_params['load_from_file_sql'])
 
 
@@ -160,7 +160,7 @@ def check_row_number(run_params, ti=None):
     # Récupérer les résultats de la tâche get_flight_data et eviter plusieurs appels.
     get_flight_data = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="return_value")
 
-    with duckdb.connect("dags/data/bdd_airflow") as conn:
+    with duckdb.connect(DB_PATH) as conn:
         if not run_params["timestamp_required"]:
             timestamp = get_flight_data[0]['timestamp']
             rows_states = get_flight_data[0]['rows']
@@ -186,7 +186,7 @@ def check_row_number(run_params, ti=None):
 
 @task
 def check_duplicates(run_params):
-    with duckdb.connect("dags/data/bdd_airflow") as conn:
+    with duckdb.connect(DB_PATH) as conn:
         nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql']).fetchone()[0]
 
     print(f"Lignes dupliquées={nb_lignes_duplicates}")
