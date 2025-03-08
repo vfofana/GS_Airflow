@@ -1,6 +1,5 @@
 import time
 from datetime import datetime
-
 import duckdb
 from airflow.decorators import task, task_group
 from airflow.models import Param
@@ -12,11 +11,17 @@ from airflow.sensors.filesystem import FileSensor
 from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
-
+from dotenv import load_dotenv
+import os
 from sqlalchemy.sql import True_
 
-CREDENTIALS = {"username": 'FOFANA',
-               "password": "Juni0r2104."}
+
+load_dotenv()
+
+CREDENTIALS = {"username":os.getenv('IDOPENSKY'),
+               "password":os.getenv('MOTDEPASSE')}
+
+sql_path = "dags/sql/"
 
 liste_des_apis = [
     {
@@ -71,20 +76,20 @@ def generer_data_file_name(api, dag_run=None):
 
 @task
 def execute_sql_queries(api_a):
-    # SQL pour charger les données dans le DWH
-    with open("dags/load_from_file.sql", "r") as f:
-        load_from_file_sql = f.read().format(target_table=api_a["target_table"], data_file_name=api_a["data_file_name"])
-    api_a["load_from_file_sql"] = load_from_file_sql
+    #SQL pour charger les données dans le DWH
+    with open(sql_path+"load_from_file.sql","r") as f:
+        load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
+    out["load_from_file_sql"] = load_from_file_sql
 
-    # SQL pour compter les lignes dans le DWH
-    with open("dags/check_db_row.sql", "r") as f:
+    #SQL pour compter les lignes dans le DWH
+    with open(sql_path+"check_db_row.sql", "r") as f:
         check_db_row_sql = f.read()
     api_a["check_db_row_sql"] = check_db_row_sql
 
-    # SQL pour verifier le nombre de lignes dupliquées dans le DWH
-    with open("dags/check_duplicates.sql", "r") as f:
-        check_duplicates_sql = f.read().format(target_table=api_a["target_table"])
-    api_a["check_duplicates_sql"] = check_duplicates_sql
+    #SQL pour verifier le nombre de lignes dupliquées dans le DWH
+    with open(sql_path+"check_duplicates.sql", "r") as f:
+        check_duplicates_sql = f.read().format(target_table=out["target_table"])
+    out["check_duplicates_sql"] = check_duplicates_sql
 
     return {'api_b': api_a}
 
