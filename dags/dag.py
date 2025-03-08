@@ -93,14 +93,8 @@ def run_parameters(api, dag_run=None, ti=None):
 
     return {"run_params":out}
 
-def flights_to_dict(flights,timestamp):
-    out = []
-
-    for flight in flights:
-        flight["timestamp"] = timestamp
-        out.append(flight)
-
-    return out
+def flights_to_dict(flights, timestamp):
+    return [dict(flight, timestamp=timestamp) for flight in flights]
 
 def states_to_dict(states_list, colonnes, timestamp):
     out = []
