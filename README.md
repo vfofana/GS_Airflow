@@ -14,7 +14,7 @@ expérience avec cet outil, malgrés ses nombreux défauts.
 Pour rendre ce cours le plus pratique possible, on vous propose d'apprendre à utiliser Airflow
 en construisant un _pipeline_ de données qui ressemblera à là à ceci
 
-![Dag final](images/dag_final.png "Dag final du cours")
+![Dag final](images/dag_projet_final.png "Dag final du cours")
 
 # Mise en place de l'environnement de travail
 1. Clonez ou créez un fork de ce repo pour pouvoir travailler dessus directement

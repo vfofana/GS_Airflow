@@ -8,6 +8,7 @@ from airflow.operators.empty import EmptyOperator
 import requests
 from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
 from airflow.sensors.filesystem import FileSensor
+from airflow.utils.trigger_rule import TriggerRule
 from marshmallow.utils import timestamp
 from requests.auth import HTTPBasicAuth
 import json
@@ -20,8 +21,6 @@ load_dotenv()
 
 CREDENTIALS = {"username":os.getenv('IDOPENSKY'),
                "password":os.getenv('MOTDEPASSE')}
-
-sql_path = "dags/sql/"
 
 liste_des_apis = [
     {
@@ -60,7 +59,7 @@ liste_des_apis = [
 
 ]
 
-
+sql_path = "dags/sql/"
 DB_PATH = "dags/data/bdd_airflow"
 
 def format_datetime(input_datetime):
@@ -78,11 +77,14 @@ def generer_data_file_name(api, dag_run=None):
     return {'api_a':api}
 
 @task
-def execute_sql_queries(api_a):
-    #SQL pour charger les données dans le DWH
+def read_sql_queries(api_a):
+    #SQL pour charger les données dans le DWH depuis un fichier
     with open(sql_path+"load_from_file.sql","r") as f:
-        load_from_file_sql = f.read().format(target_table=out["target_table"], data_file_name = out["data_file_name"])
-    out["load_from_file_sql"] = load_from_file_sql
+        load_from_file_sql = f.read().format(target_table=api_a["target_table"], data_file_name = api_a["data_file_name"])
+    api_a["load_from_file_sql"] = load_from_file_sql
+
+    # SQL pour charger les données dans le DWH de manière classic
+    api_a["load_classic_sql"] = f"INSERT INTO {api_a['target_table']} (SELECT * FROM '{api_a['data_file_name']}')"
 
     #SQL pour compter les lignes dans le DWH
     with open(sql_path+"check_db_row.sql", "r") as f:
@@ -91,8 +93,8 @@ def execute_sql_queries(api_a):
 
     #SQL pour verifier le nombre de lignes dupliquées dans le DWH
     with open(sql_path+"check_duplicates.sql", "r") as f:
-        check_duplicates_sql = f.read().format(target_table=out["target_table"])
-    out["check_duplicates_sql"] = check_duplicates_sql
+        check_duplicates_sql = f.read().format(target_table=api_a["target_table"])
+    api_a["check_duplicates_sql"] = check_duplicates_sql
 
     return {'api_b': api_a}
 
@@ -108,10 +110,10 @@ def update_url(api_b , ti=None):
 @task_group
 def prepare_data_tg(liste_des_apis):
     data_file_name_task = generer_data_file_name.expand(api=liste_des_apis)
-    execute_sql_queries_task = execute_sql_queries.expand_kwargs(data_file_name_task)
-    update_url_task = update_url.expand_kwargs(execute_sql_queries_task)
+    read_sql_queries_task = read_sql_queries.expand_kwargs(data_file_name_task)
+    update_url_task = update_url.expand_kwargs(read_sql_queries_task)
 
-    data_file_name_task >> execute_sql_queries_task >> update_url_task
+    data_file_name_task >> read_sql_queries_task >> update_url_task
 
     return update_url_task
 
@@ -128,7 +130,12 @@ def states_to_dict(states_list, colonnes, timestamp):
 
 @task_group
 def ingestion_data_tg(creds, run_params):
-    get_flight_data(creds=creds, run_params=run_params) >> load_from_file(run_params)
+    get_flight_data_task = get_flight_data(creds=creds, run_params=run_params)
+    branch_load_data_task = branch_load_data(run_params=run_params)
+    load_data = [load_from_file(run_params=run_params), load_classic(run_params=run_params)]
+
+    get_flight_data_task >> branch_load_data_task
+    branch_load_data_task >> load_data
 
 @task_group
 def data_quality_tg(run_params):
@@ -165,13 +172,34 @@ def get_flight_data(creds,run_params):
         'rows' : len(response_json)
     }
 
+@task.branch
+def branch_load_data(run_params,ti=None):
+    get_flight_data = ti.xcom_pull(task_ids="get_flight_data", key="return_value")
+    if not run_params["timestamp_required"]:
+        rows_states = get_flight_data[0]['rows']
+        if rows_states <= 600:
+            return "ingestion_data_tg.load_classic"
+        else:
+            return "ingestion_data_tg.load_from_file"
+    else:
+        rows_flight = get_flight_data[1]['rows']
+        if rows_flight <= 600:
+            return "ingestion_data_tg.load_classic"
+        else:
+            return "ingestion_data_tg.load_from_file"
+
+
 @task
 def load_from_file(run_params):
     with duckdb.connect(DB_PATH) as conn:
         conn.sql(run_params['load_from_file_sql'])
 
-
 @task
+def load_classic(run_params):
+    with duckdb.connect(DB_PATH) as conn:
+        conn.sql(run_params['load_classic_sql'])
+
+@task(trigger_rule=TriggerRule.ALL_DONE)
 def check_row_number(run_params, ti=None):
     # Récupérer les résultats de la tâche get_flight_data et eviter plusieurs appels.
     get_flight_data = ti.xcom_pull(task_ids="ingestion_data_tg.get_flight_data", key="return_value")
@@ -200,7 +228,7 @@ def check_row_number(run_params, ti=None):
             else:
                 print("Flights data OK")
 
-@task
+@task(trigger_rule=TriggerRule.ALL_DONE)
 def check_duplicates(run_params):
     with duckdb.connect(DB_PATH) as conn:
         nb_lignes_duplicates= conn.sql(run_params['check_duplicates_sql']).fetchone()[0]
